@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FT-991A CAT Console</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-left" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-right" aria-hidden="true"></div>
+
+    <main class="app-shell">
+        <header class="topbar panel">
+            <div>
+                <p class="eyebrow">YAESU CAT CONTROL</p>
+                <h1>FT-991A Station Console</h1>
+                <p class="subtitle">Made by Zorko Enterprise Labs</p>
+            </div>
+            <div class="live-pill" id="link-pill">Serial Offline</div>
+        </header>
+
+        <section class="status-grid">
+            <article class="status-card panel">
+                <p>Frequency</p>
+                <h2 id="stat-frequency">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>Mode</p>
+                <h2 id="stat-mode">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>RF Power</p>
+                <h2 id="stat-rf">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>Squelch</p>
+                <h2 id="stat-sq">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>Power</p>
+                <h2 id="stat-power">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>PTT</p>
+                <h2 id="stat-ptt">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>Tuner</p>
+                <h2 id="stat-tuner">N/A</h2>
+            </article>
+        </section>
+
+        <section class="control-grid">
+            <article class="panel card">
+                <h3>Serial Link</h3>
+                <div class="form-row">
+                    <label for="port-select">Port</label>
+                    <select id="port-select"></select>
+                </div>
+                <div class="form-row split-2">
+                    <div>
+                        <label for="baud-select">Baud</label>
+                        <select id="baud-select">
+                            <option>4800</option>
+                            <option>9600</option>
+                            <option>19200</option>
+                            <option selected>38400</option>
+                            <option>57600</option>
+                            <option>115200</option>
+                        </select>
+                    </div>
+                    <label class="check-row">
+                        <input type="checkbox" id="rtscts-checkbox">
+                        RTS/CTS
+                    </label>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-muted" id="btn-refresh-ports" type="button">Refresh Ports</button>
+                    <button class="btn" id="btn-connect" type="button">Connect</button>
+                    <button class="btn btn-danger" id="btn-disconnect" type="button">Disconnect</button>
+                </div>
+                <p class="small-note" id="serial-meta">No port selected.</p>
+            </article>
+
+            <article class="panel card">
+                <h3>VFO Control</h3>
+                <div class="form-row">
+                    <label for="freq-input">Frequency (MHz)</label>
+                    <div class="inline-action">
+                        <input id="freq-input" type="number" min="0" step="0.000001" placeholder="14.200000">
+                        <button class="btn" id="btn-set-frequency" type="button">Set</button>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="band-select">Band Preset</label>
+                    <div class="inline-action">
+                        <select id="band-select">
+                            <option value="160m">160m - 1.850 LSB</option>
+                            <option value="80m">80m - 3.700 LSB</option>
+                            <option value="40m">40m - 7.100 LSB</option>
+                            <option value="30m">30m - 10.120 CW</option>
+                            <option value="20m" selected>20m - 14.250 USB</option>
+                            <option value="17m">17m - 18.130 USB</option>
+                            <option value="15m">15m - 21.200 USB</option>
+                            <option value="12m">12m - 24.940 USB</option>
+                            <option value="10m">10m - 28.400 USB</option>
+                            <option value="6m">6m - 50.200 USB</option>
+                            <option value="2m">2m - 145.450 FM</option>
+                            <option value="70cm">70cm - 432.200 USB</option>
+                        </select>
+                        <button class="btn" id="btn-set-band" type="button">Load</button>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="mode-select">Mode</label>
+                    <div class="inline-action">
+                        <select id="mode-select">
+                            <option>LSB</option>
+                            <option selected>USB</option>
+                            <option>CW</option>
+                            <option>FM</option>
+                            <option>AM</option>
+                            <option>DATA-L</option>
+                            <option>DATA-U</option>
+                        </select>
+                        <button class="btn" id="btn-set-mode" type="button">Apply</button>
+                    </div>
+                </div>
+            </article>
+
+            <article class="panel card">
+                <h3>Transmit And Audio</h3>
+                <div class="action-groups">
+                    <div class="action-group">
+                        <p class="action-label">PTT</p>
+                        <div class="action-row action-row-2">
+                            <button class="btn btn-warn" id="btn-tx" type="button">PTT TX</button>
+                            <button class="btn btn-muted" id="btn-rx" type="button">PTT RX</button>
+                        </div>
+                    </div>
+                    <div class="action-group">
+                        <p class="action-label">Power</p>
+                        <div class="action-row action-row-2">
+                            <button class="btn" id="btn-power-on" type="button">Power ON</button>
+                            <button class="btn btn-danger" id="btn-power-off" type="button">Power OFF</button>
+                        </div>
+                    </div>
+                    <div class="action-group">
+                        <p class="action-label">Tuner</p>
+                        <div class="action-row action-row-3">
+                            <button class="btn" id="btn-tuner-start" type="button">Tune Start</button>
+                            <button class="btn btn-muted" id="btn-tuner-on" type="button">Tuner ON</button>
+                            <button class="btn btn-danger" id="btn-tuner-off" type="button">Tuner OFF</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="rf-slider">RF Power (5-100 W)</label>
+                    <div class="range-row">
+                        <input id="rf-slider" type="range" min="5" max="100" value="50">
+                        <input id="rf-value" type="number" min="5" max="100" value="50">
+                        <button class="btn" id="btn-set-rf" type="button">Set</button>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="sq-slider">Squelch (0-100)</label>
+                    <div class="range-row">
+                        <input id="sq-slider" type="range" min="0" max="100" value="30">
+                        <input id="sq-value" type="number" min="0" max="100" value="30">
+                        <button class="btn" id="btn-set-sq" type="button">Set</button>
+                    </div>
+                </div>
+            </article>
+
+            <article class="panel card live-view-card">
+                <h3>Live View</h3>
+                <div class="form-row">
+                    <label for="camera-select">Camera</label>
+                    <select id="camera-select">
+                        <option value="">Default camera</option>
+                    </select>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-muted" id="btn-refresh-cameras" type="button">Refresh Cameras</button>
+                    <button class="btn" id="btn-start-camera" type="button">Start Live View</button>
+                    <button class="btn btn-danger" id="btn-stop-camera" type="button">Stop Live View</button>
+                </div>
+                <p class="small-note" id="camera-status">Camera stopped.</p>
+                <div class="live-frame">
+                    <video id="live-video" autoplay playsinline muted></video>
+                    <div class="live-overlay">Not Supported</div>
+                </div>
+            </article>
+
+        </section>
+
+        <section class="panel log-panel">
+            <div class="log-head">
+                <h3>Activity Log</h3>
+                <button class="btn btn-muted" id="btn-clear-log" type="button">Clear</button>
+            </div>
+            <div id="log-output" class="log-output"></div>
+        </section>
+    </main>
+
+    <script>
+        const SERIAL_PROFILE_KEY = "ft991_serial_profile_v1";
+        const EDIT_GUARD_MS = 900;
+
+        const el = {
+            linkPill: document.getElementById("link-pill"),
+            statFreq: document.getElementById("stat-frequency"),
+            statMode: document.getElementById("stat-mode"),
+            statRf: document.getElementById("stat-rf"),
+            statSq: document.getElementById("stat-sq"),
+            statPower: document.getElementById("stat-power"),
+            statPtt: document.getElementById("stat-ptt"),
+            statTuner: document.getElementById("stat-tuner"),
+            portSelect: document.getElementById("port-select"),
+            baudSelect: document.getElementById("baud-select"),
+            rtscts: document.getElementById("rtscts-checkbox"),
+            serialMeta: document.getElementById("serial-meta"),
+            freqInput: document.getElementById("freq-input"),
+            bandSelect: document.getElementById("band-select"),
+            modeSelect: document.getElementById("mode-select"),
+            rfSlider: document.getElementById("rf-slider"),
+            rfValue: document.getElementById("rf-value"),
+            sqSlider: document.getElementById("sq-slider"),
+            sqValue: document.getElementById("sq-value"),
+            cameraSelect: document.getElementById("camera-select"),
+            cameraStatus: document.getElementById("camera-status"),
+            liveVideo: document.getElementById("live-video"),
+            logOutput: document.getElementById("log-output"),
+        };
+
+        let cameraStream = null;
+        let rfLastEditAt = 0;
+        let sqLastEditAt = 0;
+
+        function loadSerialProfile() {
+            try {
+                const raw = localStorage.getItem(SERIAL_PROFILE_KEY);
+                if (!raw) {
+                    return {};
+                }
+                const profile = JSON.parse(raw);
+                return typeof profile === "object" && profile ? profile : {};
+            } catch {
+                return {};
+            }
+        }
+
+        function saveSerialProfile(patch) {
+            const current = loadSerialProfile();
+            const next = { ...current, ...patch };
+            localStorage.setItem(SERIAL_PROFILE_KEY, JSON.stringify(next));
+        }
+
+        function pushLog(message, type = "info") {
+            const row = document.createElement("div");
+            row.className = `log-row ${type}`;
+            const stamp = new Date().toLocaleTimeString();
+            row.textContent = `[${stamp}] ${message}`;
+            el.logOutput.prepend(row);
+        }
+
+        function setCameraStatus(text) {
+            el.cameraStatus.textContent = text;
+        }
+
+        function stopCameraTracks() {
+            if (!cameraStream) {
+                return;
+            }
+            cameraStream.getTracks().forEach((track) => track.stop());
+            cameraStream = null;
+            el.liveVideo.srcObject = null;
+        }
+
+        async function refreshCameras() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                setCameraStatus("Camera API is not available in this browser.");
+                pushLog("Camera list unavailable: browser does not support media devices API.", "error");
+                return;
+            }
+
+            const previousValue = el.cameraSelect.value;
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cameras = devices.filter((device) => device.kind === "videoinput");
+
+            el.cameraSelect.innerHTML = "";
+            if (!cameras.length) {
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = "No cameras detected";
+                el.cameraSelect.appendChild(option);
+                setCameraStatus("No camera devices found.");
+                return;
+            }
+
+            cameras.forEach((camera, index) => {
+                const option = document.createElement("option");
+                option.value = camera.deviceId;
+                option.textContent = camera.label || `Camera ${index + 1}`;
+                el.cameraSelect.appendChild(option);
+            });
+
+            if (previousValue && cameras.some((camera) => camera.deviceId === previousValue)) {
+                el.cameraSelect.value = previousValue;
+            }
+            setCameraStatus("Camera list updated.");
+        }
+
+        async function startLiveView() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                setCameraStatus("Live View is not supported in this browser.");
+                pushLog("Live View unavailable: browser does not support getUserMedia.", "error");
+                return;
+            }
+
+            try {
+                const selectedDeviceId = el.cameraSelect.value;
+                const videoConstraint = selectedDeviceId
+                    ? { deviceId: { exact: selectedDeviceId } }
+                    : true;
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraint,
+                    audio: false,
+                });
+
+                stopCameraTracks();
+                cameraStream = stream;
+                el.liveVideo.srcObject = stream;
+                const track = stream.getVideoTracks()[0];
+                const label = track?.label || "camera";
+                setCameraStatus(`Live view running: ${label}`);
+                pushLog(`Live View started (${label}).`, "ok");
+
+                await refreshCameras();
+                if (selectedDeviceId) {
+                    el.cameraSelect.value = selectedDeviceId;
+                }
+            } catch (error) {
+                setCameraStatus("Failed to start camera. Check permissions.");
+                pushLog(`Live View start failed: ${error.message}`, "error");
+            }
+        }
+
+        function stopLiveView() {
+            stopCameraTracks();
+            setCameraStatus("Camera stopped.");
+            pushLog("Live View stopped.", "info");
+        }
+
+        async function api(path, payload) {
+            const response = await fetch(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload || {}),
+            });
+            const data = await response.json();
+            return { ok: response.ok, data };
+        }
+
+        function updateLinkIndicator(connected) {
+            el.linkPill.textContent = connected ? "Serial Online" : "Serial Offline";
+            el.linkPill.classList.toggle("online", connected);
+        }
+
+        function parseNumeric(value) {
+            const match = String(value ?? "").match(/\d+/);
+            return match ? Number(match[0]) : null;
+        }
+
+        function isRfControlActive() {
+            return document.activeElement === el.rfSlider || document.activeElement === el.rfValue;
+        }
+
+        function isSqControlActive() {
+            return document.activeElement === el.sqSlider || document.activeElement === el.sqValue;
+        }
+
+        function canSyncRfFromStatus() {
+            return !isRfControlActive() && (Date.now() - rfLastEditAt > EDIT_GUARD_MS);
+        }
+
+        function canSyncSqFromStatus() {
+            return !isSqControlActive() && (Date.now() - sqLastEditAt > EDIT_GUARD_MS);
+        }
+
+        function syncSlidersFromStatus(status) {
+            const rf = parseNumeric(status.rf_power);
+            if (Number.isFinite(rf) && canSyncRfFromStatus()) {
+                const rfClamped = Math.max(5, Math.min(100, rf));
+                el.rfSlider.value = String(rfClamped);
+                el.rfValue.value = String(rfClamped);
+            }
+
+            const sq = parseNumeric(status.squelch);
+            if (Number.isFinite(sq) && canSyncSqFromStatus()) {
+                const sqClamped = Math.max(0, Math.min(100, sq));
+                el.sqSlider.value = String(sqClamped);
+                el.sqValue.value = String(sqClamped);
+            }
+        }
+
+        function renderStatus(status) {
+            el.statFreq.textContent = status.frequency || "N/A";
+            el.statMode.textContent = status.mode || "N/A";
+            el.statRf.textContent = status.rf_power || "N/A";
+            el.statSq.textContent = status.squelch || "N/A";
+            el.statPower.textContent = status.power || "N/A";
+            el.statPtt.textContent = status.ptt || "N/A";
+            el.statTuner.textContent = status.tuner || "N/A";
+            updateLinkIndicator(Boolean(status.connected));
+            syncSlidersFromStatus(status);
+        }
+
+        async function refreshPorts() {
+            const response = await fetch("/api/ports");
+            const data = await response.json();
+            const profile = loadSerialProfile();
+
+            el.portSelect.innerHTML = "";
+            const ports = data.ports || [];
+
+            if (!ports.length) {
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = "No COM ports found";
+                el.portSelect.appendChild(option);
+            } else {
+                ports.forEach((entry) => {
+                    const option = document.createElement("option");
+                    option.value = entry.device;
+                    option.textContent = `${entry.device} - ${entry.description}`;
+                    el.portSelect.appendChild(option);
+                });
+            }
+
+            const serial = data.serial || {};
+            if (serial.port) {
+                el.portSelect.value = serial.port;
+            } else if (profile.port) {
+                el.portSelect.value = profile.port;
+            }
+            el.baudSelect.value = String(serial.baud || profile.baud || "38400");
+            el.rtscts.checked =
+                typeof serial.rtscts === "boolean" ? Boolean(serial.rtscts) : Boolean(profile.rtscts);
+            el.serialMeta.textContent = serial.connected
+                ? `Connected to ${serial.port} @ ${serial.baud}`
+                : profile.port
+                    ? `Ready: ${profile.port} @ ${profile.baud || "38400"}`
+                    : "Disconnected";
+            updateLinkIndicator(Boolean(serial.connected));
+
+            return { serial, ports };
+        }
+
+        async function pollStatus() {
+            try {
+                const response = await fetch("/api/status");
+                const data = await response.json();
+                renderStatus(data.status || {});
+            } catch (error) {
+                pushLog(`Status poll failed: ${error.message}`, "error");
+            }
+        }
+
+        async function connectSerial(options = {}) {
+            const { silent = false } = options;
+            const payload = {
+                port: el.portSelect.value,
+                baud: Number(el.baudSelect.value),
+                rtscts: el.rtscts.checked,
+            };
+            const result = await api("/api/connect", payload);
+            if (result.ok) {
+                saveSerialProfile({
+                    port: payload.port,
+                    baud: payload.baud,
+                    rtscts: payload.rtscts,
+                    autoReconnect: true,
+                });
+            }
+            if (!silent || !result.ok) {
+                pushLog(result.data.message, result.ok ? "ok" : "error");
+            }
+            await refreshPorts();
+            await pollStatus();
+        }
+
+        async function disconnectSerial() {
+            const result = await api("/api/disconnect", {});
+            pushLog(result.data.message, result.ok ? "ok" : "error");
+            if (result.ok) {
+                saveSerialProfile({ autoReconnect: false });
+            }
+            await refreshPorts();
+            await pollStatus();
+        }
+
+        async function runControl(path, payload, label) {
+            const result = await api(path, payload);
+            pushLog(`${label}: ${result.data.message}`, result.ok ? "ok" : "error");
+            await pollStatus();
+        }
+
+        function bindValueSync(slider, input, onValueChange) {
+            slider.addEventListener("input", () => {
+                input.value = slider.value;
+                if (onValueChange) {
+                    onValueChange(slider.value);
+                }
+            });
+            input.addEventListener("input", () => {
+                slider.value = input.value;
+                if (onValueChange) {
+                    onValueChange(input.value);
+                }
+            });
+        }
+
+        bindValueSync(el.rfSlider, el.rfValue, (value) => {
+            rfLastEditAt = Date.now();
+        });
+        bindValueSync(el.sqSlider, el.sqValue, (value) => {
+            sqLastEditAt = Date.now();
+        });
+
+        document.getElementById("btn-refresh-ports").addEventListener("click", refreshPorts);
+        document.getElementById("btn-connect").addEventListener("click", connectSerial);
+        document.getElementById("btn-disconnect").addEventListener("click", disconnectSerial);
+
+        document.getElementById("btn-set-frequency").addEventListener("click", async () => {
+            await runControl("/api/set/frequency", { frequency: el.freqInput.value }, "Set frequency");
+        });
+
+        document.getElementById("btn-set-band").addEventListener("click", async () => {
+            await runControl("/api/set/band", { band: el.bandSelect.value }, "Set band");
+        });
+
+        document.getElementById("btn-set-mode").addEventListener("click", async () => {
+            await runControl("/api/set/mode", { mode: el.modeSelect.value }, "Set mode");
+        });
+
+        document.getElementById("btn-set-rf").addEventListener("click", async () => {
+            await runControl("/api/set/rf_power", { rf_power: Number(el.rfValue.value) }, "Set RF power");
+        });
+
+        document.getElementById("btn-set-sq").addEventListener("click", async () => {
+            await runControl("/api/set/squelch", { squelch: Number(el.sqValue.value) }, "Set squelch");
+        });
+
+        document.getElementById("btn-tx").addEventListener("click", async () => {
+            await runControl("/api/set/ptt", { state: "TX" }, "PTT");
+        });
+
+        document.getElementById("btn-rx").addEventListener("click", async () => {
+            await runControl("/api/set/ptt", { state: "RX" }, "PTT");
+        });
+
+        document.getElementById("btn-power-on").addEventListener("click", async () => {
+            await runControl("/api/set/power", { state: "ON" }, "Power");
+        });
+
+        document.getElementById("btn-power-off").addEventListener("click", async () => {
+            await runControl("/api/set/power", { state: "OFF" }, "Power");
+        });
+
+        document.getElementById("btn-tuner-start").addEventListener("click", async () => {
+            await runControl("/api/set/tuner", { action: "start" }, "Tuner");
+        });
+
+        document.getElementById("btn-tuner-on").addEventListener("click", async () => {
+            await runControl("/api/set/tuner", { action: "on" }, "Tuner");
+        });
+
+        document.getElementById("btn-tuner-off").addEventListener("click", async () => {
+            await runControl("/api/set/tuner", { action: "off" }, "Tuner");
+        });
+
+        document.getElementById("btn-refresh-cameras").addEventListener("click", async () => {
+            await refreshCameras();
+        });
+
+        document.getElementById("btn-start-camera").addEventListener("click", async () => {
+            await startLiveView();
+        });
+
+        document.getElementById("btn-stop-camera").addEventListener("click", () => {
+            stopLiveView();
+        });
+
+        document.getElementById("btn-clear-log").addEventListener("click", () => {
+            el.logOutput.innerHTML = "";
+        });
+
+        async function bootstrap() {
+            const { serial } = await refreshPorts();
+            const profile = loadSerialProfile();
+            await refreshCameras();
+
+            if (!serial.connected && profile.autoReconnect && (profile.port || el.portSelect.value)) {
+                pushLog("Restoring CAT link after refresh...", "info");
+                await connectSerial({ silent: true });
+            }
+
+            await pollStatus();
+            setInterval(pollStatus, 1200);
+            pushLog("Console ready.", "ok");
+        }
+
+        window.addEventListener("beforeunload", () => {
+            stopCameraTracks();
+        });
+
+        bootstrap();
+    </script>
+</body>
+</html>
