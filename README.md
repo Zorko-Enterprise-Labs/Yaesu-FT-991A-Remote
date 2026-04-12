@@ -52,7 +52,9 @@ python app.py
 Open:
 
 http://127.0.0.1:5000
+
 or
+
 http://{your_computer_ip}:5000
 
 Then in the UI:
