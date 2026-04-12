@@ -21,7 +21,7 @@ PTT, radio power, and tuner functions from a local web UI.
 
 ## Future Editions Roadmap
 
-- [] Live View (webcam panel)
+- [ ] Live View (webcam panel)
 - [ ] More control options (expanded radio menus and advanced CAT controls)
 - [ ] Live microphone stream (browser audio capture controls)
 - [ ] Live speaker/monitor audio stream in browser
