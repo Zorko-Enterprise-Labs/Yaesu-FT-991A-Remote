@@ -16,8 +16,17 @@ PTT, radio power, and tuner functions from a local web UI.
 - PTT TX/RX switching
 - Radio power ON/OFF (with power-on burst retry)
 - Tuner control (ON/OFF/Tune Start)
-- Raw CAT command terminal
+- Live webcam view panel
 - Auto-reconnect behavior after browser refresh
+
+## Future Editions Roadmap
+
+- [] Live View (webcam panel)
+- [ ] More control options (expanded radio menus and advanced CAT controls)
+- [ ] Live microphone stream (browser audio capture controls)
+- [ ] Live speaker/monitor audio stream in browser
+- [ ] Save and load user profiles (bands, power presets, UI preferences)
+- [ ] Multi-radio support in one dashboard
 
 ## Project Structure
 
