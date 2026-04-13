@@ -234,6 +234,10 @@ If band preset changes mode but not frequency:
 2. Use raw CAT terminal to test FA/FB responses.
 3. Confirm VFO behavior on the radio front panel.
 
+If nothing else works:
+
+1. Make a issue ticked
+
 ## License
 
 Made under Apache 2.0 License.
