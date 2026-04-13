@@ -50,6 +50,14 @@
                 <p>Tuner</p>
                 <h2 id="stat-tuner">N/A</h2>
             </article>
+            <article class="status-card panel">
+                <p>VoIP Link</p>
+                <h2 id="stat-voip-link">N/A</h2>
+            </article>
+            <article class="status-card panel">
+                <p>VoIP TX Gate</p>
+                <h2 id="stat-voip-tx">N/A</h2>
+            </article>
         </section>
 
         <section class="control-grid">
@@ -59,7 +67,7 @@
                     <label for="port-select">Port</label>
                     <select id="port-select"></select>
                 </div>
-                <div class="form-row split-2">
+                <div class="form-row split-2-equal">
                     <div>
                         <label for="baud-select">Baud</label>
                         <select id="baud-select">
@@ -124,6 +132,7 @@
                             <option>AM</option>
                             <option>DATA-L</option>
                             <option>DATA-U</option>
+                            <option>C4FM</option>
                         </select>
                         <button class="btn" id="btn-set-mode" type="button">Apply</button>
                     </div>
@@ -194,6 +203,38 @@
                 </div>
             </article>
 
+            <article class="panel card">
+                <h3>VoIP Audio Link</h3>
+                <div class="form-row split-2">
+                    <div>
+                        <label for="browser-mic-device">Browser Microphone</label>
+                        <select id="browser-mic-device"></select>
+                    </div>
+                    <div>
+                        <label for="browser-speaker-device">Browser Speaker</label>
+                        <select id="browser-speaker-device"></select>
+                    </div>
+                </div>
+                <div class="form-row split-2-equal">
+                    <div>
+                        <label for="voip-input-device">Station RX Input (backend host)</label>
+                        <select id="voip-input-device"></select>
+                    </div>
+                    <div>
+                        <label for="voip-output-device">Station TX Output (backend host)</label>
+                        <select id="voip-output-device"></select>
+                    </div>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-muted" id="btn-voip-refresh-devices" type="button">Refresh Audio Devices</button>
+                    <button class="btn btn-muted" id="btn-voip-apply-config" type="button">Apply Station Ports</button>
+                    <button class="btn" id="btn-voip-connect" type="button">Start VoIP</button>
+                    <button class="btn btn-danger" id="btn-voip-disconnect" type="button">Stop VoIP</button>
+                </div>
+                <p class="small-note" id="voip-meta">VoIP inactive. Use main PTT TX/RX buttons for transmit/receive.</p>
+                <audio id="remote-audio" autoplay playsinline controls></audio>
+            </article>
+
         </section>
 
         <section class="panel log-panel">
@@ -207,6 +248,7 @@
 
     <script>
         const SERIAL_PROFILE_KEY = "ft991_serial_profile_v1";
+        const VOIP_PROFILE_KEY = "ft991_voip_profile_v1";
         const EDIT_GUARD_MS = 900;
 
         const el = {
@@ -218,6 +260,8 @@
             statPower: document.getElementById("stat-power"),
             statPtt: document.getElementById("stat-ptt"),
             statTuner: document.getElementById("stat-tuner"),
+            statVoipLink: document.getElementById("stat-voip-link"),
+            statVoipTx: document.getElementById("stat-voip-tx"),
             portSelect: document.getElementById("port-select"),
             baudSelect: document.getElementById("baud-select"),
             rtscts: document.getElementById("rtscts-checkbox"),
@@ -232,10 +276,18 @@
             cameraSelect: document.getElementById("camera-select"),
             cameraStatus: document.getElementById("camera-status"),
             liveVideo: document.getElementById("live-video"),
+            browserMicDevice: document.getElementById("browser-mic-device"),
+            browserSpeakerDevice: document.getElementById("browser-speaker-device"),
+            voipInputDevice: document.getElementById("voip-input-device"),
+            voipOutputDevice: document.getElementById("voip-output-device"),
+            voipMeta: document.getElementById("voip-meta"),
+            remoteAudio: document.getElementById("remote-audio"),
             logOutput: document.getElementById("log-output"),
         };
 
         let cameraStream = null;
+        let voipPeer = null;
+        let voipMicStream = null;
         let rfLastEditAt = 0;
         let sqLastEditAt = 0;
 
@@ -258,6 +310,25 @@
             localStorage.setItem(SERIAL_PROFILE_KEY, JSON.stringify(next));
         }
 
+        function loadVoipProfile() {
+            try {
+                const raw = localStorage.getItem(VOIP_PROFILE_KEY);
+                if (!raw) {
+                    return {};
+                }
+                const profile = JSON.parse(raw);
+                return typeof profile === "object" && profile ? profile : {};
+            } catch {
+                return {};
+            }
+        }
+
+        function saveVoipProfile(patch) {
+            const current = loadVoipProfile();
+            const next = { ...current, ...patch };
+            localStorage.setItem(VOIP_PROFILE_KEY, JSON.stringify(next));
+        }
+
         function pushLog(message, type = "info") {
             const row = document.createElement("div");
             row.className = `log-row ${type}`;
@@ -268,6 +339,29 @@
 
         function setCameraStatus(text) {
             el.cameraStatus.textContent = text;
+        }
+
+        function mediaCapabilityIssues() {
+            const issues = [];
+            const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+
+            if (!window.RTCPeerConnection) {
+                issues.push("RTCPeerConnection API missing");
+            }
+            if (!navigator.mediaDevices) {
+                issues.push("navigator.mediaDevices unavailable");
+            }
+            if (!navigator.mediaDevices?.getUserMedia) {
+                issues.push("getUserMedia unavailable");
+            }
+            if (!window.isSecureContext && !isLocalhost) {
+                issues.push("page is not secure context (HTTPS required on non-localhost)");
+            }
+            if (navigator.userAgent.includes("Electron")) {
+                issues.push("embedded/Electron browser may block media device APIs");
+            }
+
+            return issues;
         }
 
         function stopCameraTracks() {
@@ -281,8 +375,9 @@
 
         async function refreshCameras() {
             if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-                setCameraStatus("Camera API is not available in this browser.");
-                pushLog("Camera list unavailable: browser does not support media devices API.", "error");
+                const issues = mediaCapabilityIssues();
+                setCameraStatus("Camera API is not available in this browser/runtime.");
+                pushLog(`Camera unavailable: ${issues.join("; ") || "media device API not supported"}.`, "info");
                 return;
             }
 
@@ -355,6 +450,285 @@
             pushLog("Live View stopped.", "info");
         }
 
+        function setVoipMeta(text) {
+            el.voipMeta.textContent = text;
+        }
+
+        function setVoipCardState(text, isOnline = false, isTx = false) {
+            el.statVoipLink.textContent = text;
+            el.statVoipLink.classList.toggle("state-online", isOnline);
+            el.statVoipLink.classList.toggle("state-offline", !isOnline);
+            el.statVoipTx.classList.toggle("state-tx", isTx);
+        }
+
+        function stopVoipTracksOnly() {
+            if (voipMicStream) {
+                voipMicStream.getTracks().forEach((track) => track.stop());
+                voipMicStream = null;
+            }
+            el.remoteAudio.srcObject = null;
+        }
+
+        async function applyBrowserSpeakerDevice() {
+            if (!el.browserSpeakerDevice.value) {
+                return;
+            }
+            if (typeof el.remoteAudio.setSinkId !== "function") {
+                return;
+            }
+
+            try {
+                await el.remoteAudio.setSinkId(el.browserSpeakerDevice.value);
+            } catch (error) {
+                pushLog(`Browser speaker switch failed: ${error.message}`, "error");
+            }
+        }
+
+        function closeVoipPeerLocal() {
+            if (voipPeer) {
+                voipPeer.ontrack = null;
+                voipPeer.onconnectionstatechange = null;
+                voipPeer.close();
+                voipPeer = null;
+            }
+            stopVoipTracksOnly();
+        }
+
+        function populateAudioDeviceSelect(selectEl, devices, previousValue, fallbackLabel) {
+            selectEl.innerHTML = "";
+            if (!devices.length) {
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = fallbackLabel;
+                selectEl.appendChild(option);
+                return;
+            }
+
+            devices.forEach((device) => {
+                const option = document.createElement("option");
+                option.value = device.id;
+                option.textContent = device.label || `Device ${device.id}`;
+                selectEl.appendChild(option);
+            });
+
+            if (previousValue && devices.some((device) => device.id === previousValue)) {
+                selectEl.value = previousValue;
+            }
+        }
+
+        async function refreshVoipDevices() {
+            try {
+                const profile = loadVoipProfile();
+                const [deviceResponse, configResponse] = await Promise.all([
+                    fetch("/api/voip/audio_devices"),
+                    fetch("/api/voip/config"),
+                ]);
+                const deviceData = await deviceResponse.json();
+                const configData = await configResponse.json();
+                const stationDevices = deviceData.devices || {};
+                const stationConfig = configData.config || {};
+
+                populateAudioDeviceSelect(
+                    el.voipInputDevice,
+                    stationDevices.inputs || [],
+                    stationConfig.audio_input_device || profile.audioInputDevice,
+                    "No input devices"
+                );
+                populateAudioDeviceSelect(
+                    el.voipOutputDevice,
+                    stationDevices.outputs || [],
+                    stationConfig.audio_output_device || profile.audioOutputDevice,
+                    "No output devices"
+                );
+
+                if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+                    const browserDevices = await navigator.mediaDevices.enumerateDevices();
+                    const browserMics = browserDevices
+                        .filter((device) => device.kind === "audioinput")
+                        .map((device, index) => ({
+                            id: device.deviceId,
+                            label: device.label || `Microphone ${index + 1}`,
+                        }));
+                    const browserSpeakers = browserDevices
+                        .filter((device) => device.kind === "audiooutput")
+                        .map((device, index) => ({
+                            id: device.deviceId,
+                            label: device.label || `Speaker ${index + 1}`,
+                        }));
+
+                    populateAudioDeviceSelect(
+                        el.browserMicDevice,
+                        browserMics,
+                        profile.browserMicDevice,
+                        "Default microphone"
+                    );
+                    populateAudioDeviceSelect(
+                        el.browserSpeakerDevice,
+                        browserSpeakers,
+                        profile.browserSpeakerDevice,
+                        "Default speaker"
+                    );
+                    await applyBrowserSpeakerDevice();
+                } else {
+                    populateAudioDeviceSelect(
+                        el.browserMicDevice,
+                        [],
+                        "",
+                        "Browser mic API unavailable"
+                    );
+                    populateAudioDeviceSelect(
+                        el.browserSpeakerDevice,
+                        [],
+                        "",
+                        "Browser speaker API unavailable"
+                    );
+                }
+
+                setVoipMeta("Audio device list refreshed.");
+            } catch (error) {
+                pushLog(`Audio device refresh failed: ${error.message}`, "error");
+                setVoipMeta("Failed to refresh audio devices.");
+            }
+        }
+
+        async function applyStationAudioConfig() {
+            const payload = {
+                audio_input_device: el.voipInputDevice.value,
+                audio_output_device: el.voipOutputDevice.value,
+            };
+            const result = await api("/api/voip/config", payload);
+            if (result.ok) {
+                saveVoipProfile({
+                    audioInputDevice: payload.audio_input_device,
+                    audioOutputDevice: payload.audio_output_device,
+                });
+            }
+            pushLog(`Station ports: ${result.data.message}`, result.ok ? "ok" : "error");
+            return result.ok;
+        }
+
+        async function waitForIceGathering(peerConnection) {
+            if (peerConnection.iceGatheringState === "complete") {
+                return;
+            }
+            await new Promise((resolve) => {
+                const onStateChange = () => {
+                    if (peerConnection.iceGatheringState === "complete") {
+                        peerConnection.removeEventListener("icegatheringstatechange", onStateChange);
+                        resolve();
+                    }
+                };
+
+                peerConnection.addEventListener("icegatheringstatechange", onStateChange);
+                setTimeout(() => {
+                    peerConnection.removeEventListener("icegatheringstatechange", onStateChange);
+                    resolve();
+                }, 1800);
+            });
+        }
+
+        async function startVoip() {
+            if (!window.RTCPeerConnection) {
+                const issues = mediaCapabilityIssues();
+                pushLog(`VoIP unavailable: ${issues.join("; ") || "RTCPeerConnection missing"}.`, "error");
+                setVoipMeta("WebRTC peer connection API unavailable in this browser/runtime.");
+                return;
+            }
+
+            try {
+                closeVoipPeerLocal();
+
+                const pc = new RTCPeerConnection();
+                voipPeer = pc;
+
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    try {
+                        const selectedMicId = el.browserMicDevice.value;
+                        const micConstraint = selectedMicId ? { deviceId: { exact: selectedMicId } } : true;
+                        voipMicStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraint, video: false });
+                        voipMicStream.getTracks().forEach((track) => {
+                            pc.addTrack(track, voipMicStream);
+                        });
+                    } catch (micError) {
+                        pushLog(`Mic capture unavailable, continuing RX-only: ${micError.message}`, "info");
+                        setVoipMeta("Mic unavailable, VoIP started in RX-only mode.");
+                        pc.addTransceiver("audio", { direction: "recvonly" });  
+                    }
+                } else {
+                    pushLog("Mic capture API unavailable, continuing RX-only mode.", "info");
+                    setVoipMeta("Mic API unavailable, VoIP started in RX-only mode.");
+                    pc.addTransceiver("audio", { direction: "recvonly" });      
+                }
+
+                pc.ontrack = (event) => {
+                    const [remoteStream] = event.streams;
+                    if (remoteStream) {
+                        el.remoteAudio.srcObject = remoteStream;
+                        const playPromise = el.remoteAudio.play();
+                        if (playPromise && typeof playPromise.catch === "function") {
+                            playPromise.catch((e) => console.log("Audio play blocked by browser policy:", e));
+                        }
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    if (!voipPeer) {
+                        return;
+                    }
+                    setVoipMeta(`WebRTC state: ${pc.connectionState}`);
+                    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+                        closeVoipPeerLocal();
+                    }
+                };
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await waitForIceGathering(pc);
+
+                const result = await api("/api/voip/connect", {
+                    sdp: pc.localDescription.sdp,
+                    type: pc.localDescription.type,
+                });
+
+                if (!result.ok || !result.data.answer) {
+                    throw new Error(result.data?.message || "VoIP signaling failed.");
+                }
+
+                await pc.setRemoteDescription(result.data.answer);
+                saveVoipProfile({
+                    browserMicDevice: el.browserMicDevice.value,
+                    browserSpeakerDevice: el.browserSpeakerDevice.value,
+                    audioInputDevice: el.voipInputDevice.value,
+                    audioOutputDevice: el.voipOutputDevice.value,
+                });
+                await applyBrowserSpeakerDevice();
+                setVoipMeta(result.data.message || "VoIP session started.");
+                pushLog(result.data.message || "VoIP connected.", "ok");
+                if (!voipMicStream) {
+                    pushLog("VoIP is connected receive-only; TX audio requires supported browser mic APIs and permissions.", "info");
+                }
+                await pollStatus();
+            } catch (error) {
+                closeVoipPeerLocal();
+                pushLog(`VoIP start failed: ${error.message}`, "error");
+                setVoipMeta(`VoIP start failed: ${error.message}`);
+                await pollStatus();
+            }
+        }
+
+        async function stopVoip() {
+            try {
+                const result = await api("/api/voip/disconnect", {});
+                pushLog(result.data.message || "VoIP session stopped.", result.ok ? "ok" : "error");
+                setVoipMeta(result.data.message || "VoIP session stopped.");
+            } catch (error) {
+                pushLog(`VoIP stop failed: ${error.message}`, "error");
+            } finally {
+                closeVoipPeerLocal();
+                await pollStatus();
+            }
+        }
+
         async function api(path, payload) {
             const response = await fetch(path, {
                 method: "POST",
@@ -415,6 +789,20 @@
             el.statPower.textContent = status.power || "N/A";
             el.statPtt.textContent = status.ptt || "N/A";
             el.statTuner.textContent = status.tuner || "N/A";
+            const voip = status.voip || {};
+            const state = String(voip.connection_state || "idle").toUpperCase();
+            const isOnline = ["CONNECTED", "CONNECTING"].includes(state);
+            const isTx = Boolean(voip.tx_enabled);
+            el.statVoipTx.textContent = isTx ? "TX" : "RX";
+            setVoipCardState(state, isOnline, isTx);
+
+            if (!voip.stack_ready) {
+                setVoipMeta("VoIP stack unavailable. Install aiortc/av/numpy/sounddevice.");
+                el.statVoipLink.textContent = "UNAVAILABLE";
+            } else if (voip.last_error) {
+                setVoipMeta(`VoIP error: ${voip.last_error}`);
+            }
+
             updateLinkIndicator(Boolean(status.connected));
             syncSlidersFromStatus(status);
         }
@@ -595,6 +983,26 @@
             stopLiveView();
         });
 
+        document.getElementById("btn-voip-refresh-devices").addEventListener("click", async () => {
+            await refreshVoipDevices();
+        });
+
+        document.getElementById("btn-voip-apply-config").addEventListener("click", async () => {
+            await applyStationAudioConfig();
+        });
+
+        document.getElementById("btn-voip-connect").addEventListener("click", async () => {
+            const configOk = await applyStationAudioConfig();
+            if (!configOk) {
+                return;
+            }
+            await startVoip();
+        });
+
+        document.getElementById("btn-voip-disconnect").addEventListener("click", async () => {
+            await stopVoip();
+        });
+
         document.getElementById("btn-clear-log").addEventListener("click", () => {
             el.logOutput.innerHTML = "";
         });
@@ -602,7 +1010,21 @@
         async function bootstrap() {
             const { serial } = await refreshPorts();
             const profile = loadSerialProfile();
+
+            const issues = mediaCapabilityIssues();
+            if (issues.length) {
+                pushLog(`Media capability check: ${issues.join("; ")}.`, "info");
+                const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+                if (!window.isSecureContext && !isLocalhost) {
+                    pushLog(
+                        `Tip: run server with FT991_HTTPS=1 and open https://${window.location.host}.`,
+                        "info"
+                    );
+                }
+            }
+
             await refreshCameras();
+            await refreshVoipDevices();
 
             if (!serial.connected && profile.autoReconnect && (profile.port || el.portSelect.value)) {
                 pushLog("Restoring CAT link after refresh...", "info");
@@ -616,6 +1038,7 @@
 
         window.addEventListener("beforeunload", () => {
             stopCameraTracks();
+            closeVoipPeerLocal();
         });
 
         bootstrap();

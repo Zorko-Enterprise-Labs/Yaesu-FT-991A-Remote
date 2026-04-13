@@ -1,11 +1,39 @@
+import asyncio
+import contextlib
+from fractions import Fraction
 import os
+from pathlib import Path
+import queue
 import re
 import threading
 import time
+import uuid
 
 from flask import Flask, jsonify, render_template, request
 import serial
 from serial.tools import list_ports
+
+try:
+    import av
+except Exception:
+    av = None
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
+
+try:
+    from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+except Exception:
+    MediaStreamTrack = None
+    RTCPeerConnection = None
+    RTCSessionDescription = None
 
 app = Flask(__name__)
 
@@ -22,6 +50,7 @@ MODE_TO_CODE = {
     "DATA-U": "0A",
     "DATA-FM": "0B",
     "FM-N": "0C",
+    "C4FM": "0E",
 }
 
 CODE_TO_MODE = {
@@ -49,6 +78,8 @@ CODE_TO_MODE = {
     "0B": "DATA-FM",
     "C": "FM-N",
     "0C": "FM-N",
+    "E": "C4FM",
+    "0E": "C4FM",
 }
 
 BAND_PRESETS = {
@@ -91,6 +122,410 @@ def _request_data():
 
 def _clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
+
+
+VOIP_STACK_READY = all((MediaStreamTrack, RTCPeerConnection, RTCSessionDescription, av, np, sd))
+
+
+class NullAudioSink:
+    def start(self):
+        return None
+
+    def stop(self):
+        return None
+
+    def push_frame(self, frame, enabled=True):
+        return None
+
+
+if VOIP_STACK_READY:
+    class SoundDeviceInputTrack(MediaStreamTrack):
+        kind = "audio"
+
+        def __init__(self, device=None, sample_rate=48000, channels=1, frame_samples=960):
+            super().__init__()
+            self._sample_rate = int(sample_rate)
+            self._channels = int(channels)
+            self._frame_samples = int(frame_samples)
+            self._pts = 0
+            self._frames = queue.Queue(maxsize=80)
+            self._stream = sd.InputStream(
+                samplerate=self._sample_rate,
+                channels=self._channels,
+                dtype="int16",
+                device=device,
+                blocksize=self._frame_samples,
+                callback=self._on_audio,
+            )
+            self._stream.start()
+
+        def _on_audio(self, indata, frames, timing, status):
+            del frames, timing
+            if status:
+                return
+
+            mono = indata[:, 0] if indata.ndim == 2 else indata
+            if indata.ndim == 2 and indata.shape[1] > 1:
+                mono = np.mean(indata, axis=1)
+            mono = np.clip(mono, -32768, 32767).astype(np.int16, copy=False)
+
+            try:
+                self._frames.put_nowait(mono.copy())
+            except queue.Full:
+                with contextlib.suppress(queue.Empty):
+                    self._frames.get_nowait()
+                with contextlib.suppress(queue.Full):
+                    self._frames.put_nowait(mono.copy())
+
+        async def recv(self):
+            try:
+                samples = await asyncio.to_thread(self._frames.get, True, 1.0)
+            except queue.Empty:
+                samples = np.zeros(self._frame_samples, dtype=np.int16)
+
+            if samples.size == 0:
+                samples = np.zeros(self._frame_samples, dtype=np.int16)
+
+            frame = av.AudioFrame(format="s16", layout="mono", samples=int(samples.shape[0]))
+            frame.planes[0].update(samples.tobytes())
+            frame.sample_rate = self._sample_rate
+            frame.pts = self._pts
+            frame.time_base = Fraction(1, self._sample_rate)
+            self._pts += int(samples.shape[0])
+            return frame
+
+        def stop(self):
+            if self._stream:
+                with contextlib.suppress(Exception):
+                    self._stream.stop()
+                with contextlib.suppress(Exception):
+                    self._stream.close()
+                self._stream = None
+            super().stop()
+
+
+    class SoundDeviceAudioSink(NullAudioSink):
+        def __init__(self, device=None, sample_rate=48000, channels=1):
+            self._sample_rate = int(sample_rate)
+            self._channels = int(channels)
+            
+            # Simple FIFO queue
+            self._frames = queue.Queue(maxsize=30)
+            
+            # Straightforward PyAV Resampler
+            self._resampler = av.AudioResampler(
+                format="s16", 
+                layout="mono", 
+                rate=self._sample_rate
+            )
+            
+            # Remainder buffer for chunk mismatch
+            self._pending_audio = np.zeros((0, 1), dtype=np.int16)
+            
+            self._stream = sd.OutputStream(
+                samplerate=self._sample_rate,
+                channels=self._channels,
+                dtype="int16",
+                device=device,
+                callback=self._on_audio,
+            )
+
+        def _to_mono_int16(self, frame):
+            # PyAV to_ndarray() always returns (channels, samples).
+            # Transposing it (.T) converts it to (samples, channels) which SoundDevice needs.
+            samples = frame.to_ndarray().T
+            
+            # Since we requested layout='mono', channels=1, shape is now (samples, 1).
+            if np.issubdtype(samples.dtype, np.floating):
+                samples = np.clip(samples, -1.0, 1.0) * 32767.0
+            
+            return samples.astype(np.int16, copy=False)
+
+        def _on_audio(self, outdata, frames, timing, status):
+            needed = frames
+            filled = 0
+
+            # 1. Drain pending audio
+            if self._pending_audio.shape[0] > 0:
+                take = min(needed, self._pending_audio.shape[0])
+                outdata[:take, 0] = self._pending_audio[:take, 0]
+                self._pending_audio = self._pending_audio[take:]
+                filled += take
+                needed -= take
+
+            # 2. Drain from queue
+            while needed > 0:
+                try:
+                    chunk = self._frames.get_nowait()
+                    take = min(needed, chunk.shape[0])
+                    outdata[filled:filled+take, 0] = chunk[:take, 0]
+                    
+                    if chunk.shape[0] > take:
+                        self._pending_audio = chunk[take:]
+                    else:
+                        self._pending_audio = np.zeros((0, 1), dtype=np.int16)
+                    
+                    filled += take
+                    needed -= take
+                except queue.Empty:
+                    break
+
+            # 3. Fill remainder with zeros
+            if needed > 0:
+                outdata[filled:, 0].fill(0)
+
+            # 4. Copy to all output channels just in case
+            if outdata.shape[1] > 1:
+                for c in range(1, outdata.shape[1]):
+                    outdata[:, c] = outdata[:, 0]
+
+        def start(self):
+            try:
+                self._stream.start()
+            except Exception as e:
+                print(f"Error starting SoundDevice output: {e}")
+
+        def stop(self):
+            with contextlib.suppress(Exception):
+                self._stream.stop()
+                self._stream.close()
+
+        def push_frame(self, frame, enabled=True):
+            # If not transmitting, just discard the frame immediately
+            if not enabled:
+                return
+                
+            try:
+                resampled = self._resampler.resample(frame)
+                if not resampled:
+                    return
+                for f in resampled:
+                    mono = self._to_mono_int16(f)
+                    try:
+                        self._frames.put_nowait(mono)
+                    except queue.Full:
+                        with contextlib.suppress(queue.Empty):
+                            self._frames.get_nowait()
+                        with contextlib.suppress(queue.Full):
+                            self._frames.put_nowait(mono)
+            except Exception as e:
+                print(f"VoIP Transmission Error: {e}")
+
+
+
+else:
+    SoundDeviceInputTrack = None
+
+    class SoundDeviceAudioSink(NullAudioSink):
+        pass
+
+
+class VoipRuntime:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._pc = None
+        self._rx_track = None
+        self._tx_sink = NullAudioSink()
+        self._inbound_task = None
+        self._loop = None
+        self._loop_thread = None
+        self._tx_enabled = False
+        self._session_id = None
+        self._connection_state = "idle"
+        self._last_error = ""
+        self.audio_input_device = os.getenv("FT991_AUDIO_RX_DEVICE", "")
+        self.audio_output_device = os.getenv("FT991_AUDIO_TX_DEVICE", "")
+
+        if VOIP_STACK_READY:
+            self._loop = asyncio.new_event_loop()
+            self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._loop_thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _run_async(self, coroutine, timeout=15):
+        if not self._loop:
+            raise RuntimeError("VoIP stack is unavailable.")
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        return future.result(timeout=timeout)
+
+    def _parse_device(self, raw_value):
+        value = str(raw_value or "").strip()
+        if not value:
+            return None
+        return int(value) if value.isdigit() else value
+
+    def list_audio_devices(self):
+        if not sd:
+            return {"inputs": [], "outputs": []}
+
+        inputs = []
+        outputs = []
+        for index, device in enumerate(sd.query_devices()):
+            name = str(device.get("name", f"Device {index}"))
+            if int(device.get("max_input_channels", 0)) > 0:
+                inputs.append({"id": str(index), "label": name})
+            if int(device.get("max_output_channels", 0)) > 0:
+                outputs.append({"id": str(index), "label": name})
+
+        return {"inputs": inputs, "outputs": outputs}
+
+    async def _close_peer_async(self):
+        if self._inbound_task:
+            self._inbound_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._inbound_task
+            self._inbound_task = None
+
+        if self._pc:
+            with contextlib.suppress(Exception):
+                await self._pc.close()
+            self._pc = None
+
+        if self._rx_track:
+            with contextlib.suppress(Exception):
+                self._rx_track.stop()
+            self._rx_track = None
+
+        if self._tx_sink:
+            with contextlib.suppress(Exception):
+                self._tx_sink.stop()
+            self._tx_sink = NullAudioSink()
+
+    async def _consume_inbound_audio(self, track):
+        try:
+            while True:
+                frame = await track.recv()
+                with self._lock:
+                    sink = self._tx_sink
+                    enabled = self._tx_enabled
+                sink.push_frame(frame, enabled=enabled)
+        except Exception:
+            return
+
+    async def _connect_offer_async(self, offer_sdp, offer_type, input_device, output_device):
+        await self._close_peer_async()
+
+        input_choice = self._parse_device(input_device if input_device is not None else self.audio_input_device)
+        output_choice = self._parse_device(output_device if output_device is not None else self.audio_output_device)
+
+        tx_sink = SoundDeviceAudioSink(device=output_choice)
+        tx_sink.start()
+        rx_track = SoundDeviceInputTrack(device=input_choice)
+
+        pc = RTCPeerConnection()
+        pc.addTrack(rx_track)
+
+        @pc.on("track")
+        def on_track(track):
+            if track.kind != "audio":
+                return
+            self._inbound_task = asyncio.create_task(self._consume_inbound_audio(track))
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            state = pc.connectionState
+            with self._lock:
+                self._connection_state = state
+            if state in {"failed", "closed", "disconnected"}:
+                with self._lock:
+                    self._tx_enabled = False
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        with self._lock:
+            self._pc = pc
+            self._rx_track = rx_track
+            self._tx_sink = tx_sink
+            self._tx_enabled = False
+            self._session_id = uuid.uuid4().hex[:10]
+            self._connection_state = "connecting"
+            self._last_error = ""
+            if input_device is not None:
+                self.audio_input_device = str(input_device)
+            if output_device is not None:
+                self.audio_output_device = str(output_device)
+
+        return {
+            "sdp": pc.localDescription.sdp,
+            "type": pc.localDescription.type,
+        }
+
+    def connect_offer(self, offer_sdp, offer_type, input_device=None, output_device=None):
+        if not VOIP_STACK_READY:
+            return False, "VoIP stack is unavailable. Install aiortc, av, numpy, and sounddevice.", None
+
+        try:
+            answer = self._run_async(
+                self._connect_offer_async(offer_sdp, offer_type, input_device, output_device),
+                timeout=20,
+            )
+            return True, "VoIP WebRTC session started.", answer
+        except Exception as exc:
+            err_type = type(exc).__name__
+            err_msg = str(exc)
+            print(f"VoIP connect error: {err_type}: {err_msg}")
+            import traceback
+            traceback.print_exc()
+            with self._lock:
+                self._last_error = f"{err_type}: {err_msg}"
+                self._connection_state = "error"
+                self._tx_enabled = False
+            return False, f"VoIP connect failed: {err_type}: {err_msg}", None
+
+    def disconnect(self):
+        if not self._loop:
+            with self._lock:
+                self._tx_enabled = False
+                self._session_id = None
+                self._connection_state = "idle"
+            return True, "VoIP is already inactive."
+
+        try:
+            self._run_async(self._close_peer_async(), timeout=10)
+            with self._lock:
+                self._tx_enabled = False
+                self._session_id = None
+                self._connection_state = "idle"
+            return True, "VoIP session stopped."
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            return False, f"Failed to stop VoIP session: {exc}"
+
+    def set_tx_enabled(self, enabled):
+        with self._lock:
+            self._tx_enabled = bool(enabled)
+
+    def set_audio_devices(self, input_device=None, output_device=None):
+        with self._lock:
+            if input_device is not None:
+                self.audio_input_device = str(input_device)
+            if output_device is not None:
+                self.audio_output_device = str(output_device)
+
+    def get_audio_devices(self):
+        with self._lock:
+            return {
+                "audio_input_device": self.audio_input_device,
+                "audio_output_device": self.audio_output_device,
+            }
+
+    def status(self):
+        with self._lock:
+            return {
+                "stack_ready": bool(VOIP_STACK_READY),
+                "session_id": self._session_id,
+                "connection_state": self._connection_state,
+                "tx_enabled": self._tx_enabled,
+                "audio_input_device": self.audio_input_device,
+                "audio_output_device": self.audio_output_device,
+                "last_error": self._last_error,
+            }
 
 
 class FT991CatController:
@@ -199,6 +634,7 @@ class FT991CatController:
 
 
 cat = FT991CatController()
+voip = VoipRuntime()
 
 
 def parse_frequency(response):
@@ -257,6 +693,7 @@ def parse_tuner_state(response):
 
 
 def status_payload():
+    voip_state = voip.status()
     if not cat.connected:
         return {
             "connected": False,
@@ -268,6 +705,8 @@ def status_payload():
             "squelch": "N/A",
             "power": "N/A",
             "ptt": "N/A",
+            "tuner": "N/A",
+            "voip": voip_state,
         }
 
     fa_reply = cat.query("FA;")
@@ -293,6 +732,7 @@ def status_payload():
         "power": parse_switch(ps_reply, "PS"),
         "ptt": "TX" if parse_switch(tx_reply, "TX") == "ON" else "RX",
         "tuner": parse_tuner_state(ac_reply),
+        "voip": voip_state,
         "raw": {
             "FA": fa_reply,
             "MD": md_reply,
@@ -421,6 +861,63 @@ def set_mode_cat(mode_name):
     return ok, detail
 
 
+def _env_truthy(name, default="0"):
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_path(path_value):
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    return path.resolve()
+
+
+def _find_cert_pair_from_dir(cert_dir):
+    if not cert_dir.exists() or not cert_dir.is_dir():
+        return None, None
+
+    name_hint = str(os.getenv("FT991_TLS_NAME", "")).strip()
+    key_candidates = sorted(cert_dir.glob("*-key.pem"))
+    if name_hint:
+        key_candidates = [item for item in key_candidates if item.name.startswith(name_hint)]
+
+    for key_path in key_candidates:
+        cert_name = key_path.name.replace("-key.pem", ".pem")
+        cert_path = cert_dir / cert_name
+        if cert_path.exists():
+            return cert_path.resolve(), key_path.resolve()
+
+    return None, None
+
+
+def _resolve_ssl_context():
+    if not _env_truthy("FT991_HTTPS", "0"):
+        return None, "HTTP mode"
+
+    cert_path = _resolve_path(os.getenv("FT991_TLS_CERT", ""))
+    key_path = _resolve_path(os.getenv("FT991_TLS_KEY", ""))
+    if cert_path or key_path:
+        if not (cert_path and key_path):
+            raise RuntimeError("Both FT991_TLS_CERT and FT991_TLS_KEY must be provided together.")
+        if not cert_path.exists():
+            raise RuntimeError(f"TLS certificate file not found: {cert_path}")
+        if not key_path.exists():
+            raise RuntimeError(f"TLS key file not found: {key_path}")
+        return (str(cert_path), str(key_path)), f"cert={cert_path.name}, key={key_path.name}"
+
+    cert_dir = _resolve_path(os.getenv("FT991_TLS_DIR", "cert"))
+    auto_cert, auto_key = _find_cert_pair_from_dir(cert_dir) if cert_dir else (None, None)
+    if auto_cert and auto_key:
+        return (str(auto_cert), str(auto_key)), f"cert={auto_cert.name}, key={auto_key.name} (auto)"
+
+    # Werkzeug can generate a temporary self-signed cert for local/LAN testing.
+    return "adhoc", "adhoc self-signed certificate"
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -470,6 +967,92 @@ def api_disconnect():
 @app.get("/api/status")
 def api_status():
     return jsonify({"ok": True, "status": status_payload()})
+
+
+@app.get("/api/voip/audio_devices")
+def api_voip_audio_devices():
+    devices = voip.list_audio_devices()
+    return jsonify({"ok": True, "devices": devices, "status": voip.status()})
+
+
+@app.get("/api/voip/status")
+def api_voip_status():
+    return jsonify({"ok": True, "status": voip.status()})
+
+
+@app.get("/api/voip/config")
+def api_voip_config_get():
+    return jsonify({"ok": True, "config": voip.get_audio_devices(), "status": voip.status()})
+
+
+@app.post("/api/voip/config")
+def api_voip_config_set():
+    payload = _request_data()
+    input_device = payload.get("audio_input_device")
+    output_device = payload.get("audio_output_device")
+
+    if input_device is None and output_device is None:
+        return jsonify({"ok": False, "message": "No VoIP config fields provided."}), 400
+
+    voip.set_audio_devices(input_device=input_device, output_device=output_device)
+    return jsonify({
+        "ok": True,
+        "message": "VoIP station audio ports updated.",
+        "config": voip.get_audio_devices(),
+        "status": voip.status(),
+    })
+
+
+@app.post("/api/voip/connect")
+def api_voip_connect():
+    payload = _request_data()
+    sdp = str(payload.get("sdp", "")).strip()
+    sdp_type = str(payload.get("type", "offer")).strip().lower() or "offer"
+    input_device = payload.get("audio_input_device")
+    output_device = payload.get("audio_output_device")
+
+    if not sdp:
+        return jsonify({"ok": False, "message": "Missing SDP offer in request body."}), 400
+    if sdp_type != "offer":
+        return jsonify({"ok": False, "message": "SDP type must be offer."}), 400
+
+    ok, message, answer = voip.connect_offer(
+        offer_sdp=sdp,
+        offer_type=sdp_type,
+        input_device=input_device,
+        output_device=output_device,
+    )
+    status_code = 200 if ok else 500
+    return jsonify({"ok": ok, "message": message, "answer": answer, "status": voip.status()}), status_code
+
+
+@app.post("/api/voip/disconnect")
+def api_voip_disconnect():
+    ok, message = voip.disconnect()
+    status_code = 200 if ok else 500
+    return jsonify({"ok": ok, "message": message, "status": voip.status()}), status_code
+
+
+@app.post("/api/voip/ptt")
+def api_voip_ptt():
+    payload = _request_data()
+    state = str(payload.get("state", "RX")).upper()
+    if state not in {"TX", "RX"}:
+        return jsonify({"ok": False, "message": "PTT state must be TX or RX."}), 400
+
+    if not cat.connected:
+        return jsonify({"ok": False, "message": "Serial port is not connected."}), 400
+
+    command = "TX1;" if state == "TX" else "TX0;"
+    if not cat.send(command):
+        return jsonify({"ok": False, "message": "Failed to switch CAT PTT state."}), 500
+
+    voip.set_tx_enabled(state == "TX")
+    return jsonify({
+        "ok": True,
+        "message": f"VoIP and CAT switched to {state}.",
+        "status": voip.status(),
+    })
 
 
 @app.post("/api/set/frequency")
@@ -573,6 +1156,7 @@ def api_set_ptt():
     result = send_or_error(command)
     if result:
         return result
+    voip.set_tx_enabled(state == "TX")
     return jsonify({"ok": True, "message": f"PTT switched to {state}."})
 
 
@@ -647,5 +1231,20 @@ if __name__ == "__main__":
     if os.getenv("FT991_AUTO_CONNECT", "0") == "1":
         ok, msg = cat.connect()
         print(msg)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+    host = os.getenv("FT991_HOST", "0.0.0.0")
+    port = int(os.getenv("FT991_PORT_HTTP", "5000"))
+    debug = _env_truthy("FT991_DEBUG", "1")
+    try:
+        ssl_context, ssl_note = _resolve_ssl_context()
+    except Exception as exc:
+        print(f"HTTPS configuration error: {exc}")
+        raise SystemExit(1)
+
+    if ssl_context:
+        print(f"HTTPS enabled ({ssl_note}). Open https://localhost:{port} or https://<LAN-IP>:{port}")
+    else:
+        print(f"HTTP mode. Open http://localhost:{port} (LAN mic/camera may require HTTPS).")
+
+    app.run(host=host, port=port, debug=debug, ssl_context=ssl_context)
 #Made by Zorko Enterprise Labs

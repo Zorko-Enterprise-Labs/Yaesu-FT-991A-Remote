@@ -111,7 +111,7 @@ h1 {
 
 .status-grid {
     display: grid;
-    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    grid-template-columns: repeat(9, minmax(110px, 1fr));
     gap: 6px;
 }
 
@@ -136,6 +136,18 @@ h1 {
     margin: 3px 0 0;
     font-size: 14px;
     font-weight: 700;
+}
+
+.status-card h2.state-online {
+    color: var(--sap-ok);
+}
+
+.status-card h2.state-offline {
+    color: var(--sap-danger);
+}
+
+.status-card h2.state-tx {
+    color: #9b4d13;
 }
 
 .control-grid {
@@ -165,6 +177,11 @@ h3 {
 
 .split-2 {
     grid-template-columns: 1fr auto;
+    align-items: end;
+}
+
+.split-2-equal {
+    grid-template-columns: 1fr 1fr;
     align-items: end;
 }
 
@@ -326,6 +343,11 @@ input[type="range"] {
     color: #5c7083;
 }
 
+#remote-audio {
+    width: 100%;
+    margin-top: 6px;
+}
+
 .log-panel {
     padding: 10px;
 }
@@ -432,6 +454,11 @@ input[type="range"] {
 
     .range-row,
     .inline-action {
+        grid-template-columns: 1fr;
+    }
+
+    .split-2,
+    .split-2-equal {
         grid-template-columns: 1fr;
     }
 
