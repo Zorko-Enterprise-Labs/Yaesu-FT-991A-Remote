@@ -5,6 +5,8 @@ Browser-based control panel for the Yaesu FT-991A over CAT serial control.
 This project uses Flask + pyserial to control frequency, mode, RF power, squelch,
 PTT, radio power, and tuner functions from a local web UI.
 
+![preview](https://raw.githubusercontent.com/Zorko-Enterprise-Labs/Yaesu-FT-991A-Remote/refs/heads/main/design/image.png)
+
 ## Features
 
 - Live status polling (frequency, mode, RF power, squelch, power, PTT, tuner)
