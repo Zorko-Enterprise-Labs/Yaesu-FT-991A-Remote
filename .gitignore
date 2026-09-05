@@ -1,0 +1,9 @@
+station.env
+.venv/
+venv/
+.vscode/
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.log

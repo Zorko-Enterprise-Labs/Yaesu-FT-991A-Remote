@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FT-991A CAT Console</title>
+    <title>FT-991A Remote Control</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -14,11 +14,17 @@
     <main class="app-shell">
         <header class="topbar panel">
             <div>
-                <p class="eyebrow">YAESU CAT CONTROL</p>
+                <p class="eyebrow">YAESU CAT CONTROL --- Unlicensed Copy :( ---</p>
                 <h1>FT-991A Station Console</h1>
                 <p class="subtitle">Made by Zorko Enterprise Labs</p>
             </div>
-            <div class="live-pill" id="link-pill">Serial Offline</div>
+            <div class="topbar-actions">
+                <div class="live-pill" id="link-pill">Serial Offline</div>
+                <form method="post" action="{{ url_for('logout') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button class="btn btn-muted" type="submit">Sign out</button>
+                </form>
+            </div>
         </header>
 
         <section class="status-grid">
@@ -198,8 +204,8 @@
                 </div>
                 <p class="small-note" id="camera-status">Camera stopped.</p>
                 <div class="live-frame">
-                    <video id="live-video" autoplay playsinline muted></video>
-                    <div class="live-overlay">Not Supported</div>
+                    <img id="live-video" src="" alt="Live feed" style="display: none; width: 100%; height: auto;" />
+                    <div class="live-overlay">Offline</div>
                 </div>
             </article>
 
@@ -247,6 +253,7 @@
     </main>
 
     <script>
+        const CSRF_TOKEN = {{ csrf_token()|tojson }};
         const SERIAL_PROFILE_KEY = "ft991_serial_profile_v1";
         const VOIP_PROFILE_KEY = "ft991_voip_profile_v1";
         const EDIT_GUARD_MS = 900;
@@ -365,81 +372,59 @@
         }
 
         function stopCameraTracks() {
-            if (!cameraStream) {
-                return;
+            el.liveVideo.src = "";
+            el.liveVideo.style.display = "none";
+            const overlay = document.querySelector(".live-overlay");
+            if (overlay) overlay.style.display = "flex";
+            if (cameraStream) {
+                cameraStream.getTracks().forEach((track) => track.stop());
+                cameraStream = null;
             }
-            cameraStream.getTracks().forEach((track) => track.stop());
-            cameraStream = null;
-            el.liveVideo.srcObject = null;
         }
 
         async function refreshCameras() {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-                const issues = mediaCapabilityIssues();
-                setCameraStatus("Camera API is not available in this browser/runtime.");
-                pushLog(`Camera unavailable: ${issues.join("; ") || "media device API not supported"}.`, "info");
-                return;
+            setCameraStatus("Probing server cameras...");
+            try {
+                const response = await fetch("/api/cameras");
+                const data = await response.json();
+                
+                el.cameraSelect.innerHTML = "";
+                
+                if (!data.cameras || data.cameras.length === 0) {
+                    el.cameraSelect.innerHTML = '<option value="">No cameras found</option>';
+                    setCameraStatus("No server cameras found");
+                    return;
+                }
+
+                data.cameras.forEach((cam) => {
+                    const option = document.createElement("option");
+                    option.value = cam.id;
+                    option.textContent = cam.name;
+                    el.cameraSelect.appendChild(option);
+                });
+                
+                setCameraStatus(`Found ${data.cameras.length} server camera(s)`);
+            } catch (err) {
+                el.cameraSelect.innerHTML = '<option value="0">Default Camera</option>';
+                setCameraStatus("Failed to list cameras. Using default.");
             }
-
-            const previousValue = el.cameraSelect.value;
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const cameras = devices.filter((device) => device.kind === "videoinput");
-
-            el.cameraSelect.innerHTML = "";
-            if (!cameras.length) {
-                const option = document.createElement("option");
-                option.value = "";
-                option.textContent = "No cameras detected";
-                el.cameraSelect.appendChild(option);
-                setCameraStatus("No camera devices found.");
-                return;
-            }
-
-            cameras.forEach((camera, index) => {
-                const option = document.createElement("option");
-                option.value = camera.deviceId;
-                option.textContent = camera.label || `Camera ${index + 1}`;
-                el.cameraSelect.appendChild(option);
-            });
-
-            if (previousValue && cameras.some((camera) => camera.deviceId === previousValue)) {
-                el.cameraSelect.value = previousValue;
-            }
-            setCameraStatus("Camera list updated.");
         }
 
         async function startLiveView() {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                setCameraStatus("Live View is not supported in this browser.");
-                pushLog("Live View unavailable: browser does not support getUserMedia.", "error");
-                return;
-            }
-
             try {
-                const selectedDeviceId = el.cameraSelect.value;
-                const videoConstraint = selectedDeviceId
-                    ? { deviceId: { exact: selectedDeviceId } }
-                    : true;
+                const selectedCam = el.cameraSelect.value || "0";
+                
+                // Add timestamp to prevent browser caching the old stream
+                el.liveVideo.src = `/video_feed?c=${selectedCam}&_t=${Date.now()}`;
+                
+                el.liveVideo.style.display = "block";
+                const overlay = document.querySelector(".live-overlay");
+                if (overlay) overlay.style.display = "none";
 
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: videoConstraint,
-                    audio: false,
-                });
-
-                stopCameraTracks();
-                cameraStream = stream;
-                el.liveVideo.srcObject = stream;
-                const track = stream.getVideoTracks()[0];
-                const label = track?.label || "camera";
-                setCameraStatus(`Live view running: ${label}`);
-                pushLog(`Live View started (${label}).`, "ok");
-
-                await refreshCameras();
-                if (selectedDeviceId) {
-                    el.cameraSelect.value = selectedDeviceId;
-                }
+                setCameraStatus(`Live view running (Server Camera ${selectedCam})`);
+                pushLog(`Live View started (Server Camera ${selectedCam}).`, "ok");
             } catch (error) {
-                setCameraStatus("Failed to start camera. Check permissions.");
+                setCameraStatus("Failed to start camera feed.");
                 pushLog(`Live View start failed: ${error.message}`, "error");
             }
         }
@@ -732,7 +717,10 @@
         async function api(path, payload) {
             const response = await fetch(path, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRF-Token": CSRF_TOKEN,
+                },
                 body: JSON.stringify(payload || {}),
             });
             const data = await response.json();
@@ -1043,5 +1031,6 @@
 
         bootstrap();
     </script>
+<label for="camera-select">Not for general release</label>
 </body>
 </html>

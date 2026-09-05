@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in | FT-991A Remote</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <main class="app-shell login-shell">
+        <section class="panel login-panel">
+            <p class="eyebrow">YAESU CAT CONTROL</p>
+            <h1>Station Console</h1>
+            {% if error %}
+                <p class="login-error">{{ error }}</p>
+            {% endif %}
+            {% if not setup_required %}
+                <form method="post" action="{{ url_for('login_post') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+                    <label for="password">Password</label>
+                    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+                    <button class="btn" type="submit">Sign in</button>
+                </form>
+            {% else %}
+                <p class="small-note">Configure the server credentials before signing in.</p>
+            {% endif %}
+        </section>
+    </main>
+</body>
+</html>

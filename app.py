@@ -5,13 +5,16 @@ import os
 from pathlib import Path
 import queue
 import re
+import secrets
 import threading
 import time
 import uuid
+from datetime import timedelta
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 import serial
 from serial.tools import list_ports
+from werkzeug.security import check_password_hash
 
 try:
     import av
@@ -35,7 +38,157 @@ except Exception:
     RTCPeerConnection = None
     RTCSessionDescription = None
 
+
+def _load_config_file():
+    configured_path = os.getenv("FT991_CONFIG", "")
+    config_path = Path(configured_path) if configured_path else Path(__file__).resolve().with_name("station.env")
+    if not config_path.is_absolute():
+        config_path = Path(__file__).resolve().parent / config_path
+    if not config_path.exists():
+        return
+
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value.startswith(("'", '"')) and value.endswith(value[0]):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_config_file()
+
 app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=os.getenv("FT991_SECRET_KEY"),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.getenv("FT991_HTTPS", "0").lower() in {"1", "true", "yes", "on"},
+    SESSION_COOKIE_SAMESITE="Strict",
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
+)
+
+AUTH_PASSWORD_HASH = os.getenv("FT991_PASSWORD_HASH", "").strip()
+AUTH_FAILURES = {}
+AUTH_FAILURES_LOCK = threading.Lock()
+AUTH_MAX_FAILURES = 5
+AUTH_FAILURE_WINDOW = 15 * 60
+
+
+def _auth_is_configured():
+    secret_key = app.config.get("SECRET_KEY")
+    return bool(secret_key and len(secret_key) >= 32 and AUTH_PASSWORD_HASH)
+
+
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+def _request_wants_json():
+    return request.path.startswith("/api/") or request.is_json
+
+
+def _client_is_rate_limited():
+    now = time.monotonic()
+    address = request.remote_addr or "unknown"
+    with AUTH_FAILURES_LOCK:
+        failures = [stamp for stamp in AUTH_FAILURES.get(address, []) if now - stamp < AUTH_FAILURE_WINDOW]
+        AUTH_FAILURES[address] = failures
+        return len(failures) >= AUTH_MAX_FAILURES
+
+
+def _record_auth_failure():
+    address = request.remote_addr or "unknown"
+    with AUTH_FAILURES_LOCK:
+        AUTH_FAILURES.setdefault(address, []).append(time.monotonic())
+
+
+@app.before_request
+def require_authentication():
+    if request.endpoint in {"login", "login_post", "static"}:
+        return None
+
+    if not _auth_is_configured():
+        message = "Authentication is not configured. Set FT991_SECRET_KEY and FT991_PASSWORD_HASH."
+        if _request_wants_json():
+            return jsonify({"ok": False, "message": message}), 503
+        return render_template("login.html", error=message, setup_required=True), 503
+
+    if not session.get("authenticated"):
+        if _request_wants_json():
+            return jsonify({"ok": False, "message": "Authentication required."}), 401
+        return redirect(url_for("login", next=request.full_path))
+
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        supplied_token = request.headers.get("X-CSRF-Token", "") or request.form.get("csrf_token", "")
+        if not secrets.compare_digest(supplied_token, session.get("csrf_token", "")):
+            return jsonify({"ok": False, "message": "Invalid CSRF token."}), 403
+
+    return None
+
+
+@app.get("/login")
+def login():
+    return render_template(
+        "login.html",
+        error=None if _auth_is_configured() else "Authentication is not configured on this server.",
+        setup_required=not _auth_is_configured(),
+    )
+
+
+@app.post("/login")
+def login_post():
+    if not _auth_is_configured():
+        return render_template(
+            "login.html",
+            error="Authentication is not configured. Set FT991_SECRET_KEY and FT991_PASSWORD_HASH.",
+            setup_required=True,
+        ), 503
+
+    csrf_value = request.form.get("csrf_token", "")
+    if not secrets.compare_digest(csrf_value, session.get("csrf_token", "")):
+        return render_template("login.html", error="Invalid request.", setup_required=False), 403
+
+    if _client_is_rate_limited():
+        return render_template("login.html", error="Too many failed attempts. Try again later.", setup_required=False), 429
+
+    password = request.form.get("password", "")
+    try:
+        password_matches = check_password_hash(AUTH_PASSWORD_HASH, password)
+    except (TypeError, ValueError):
+        password_matches = False
+    if not password_matches:
+        _record_auth_failure()
+        return render_template("login.html", error="Invalid username or password.", setup_required=False), 401
+
+    address = request.remote_addr or "unknown"
+    with AUTH_FAILURES_LOCK:
+        AUTH_FAILURES.pop(address, None)
+    session.clear()
+    session.permanent = True
+    session["authenticated"] = True
+    session["csrf_token"] = secrets.token_urlsafe(32)
+
+    next_url = request.form.get("next", "")
+    if not next_url or not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = url_for("index")
+    return redirect(next_url)
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 MODE_TO_CODE = {
     "LSB": "01",
@@ -628,8 +781,10 @@ class FT991CatController:
                 if not reply:
                     return None
                 return reply.decode("ascii", errors="ignore").strip()
-            except Exception:
+            except (serial.SerialException, OSError):
                 self.disconnect()
+                return None
+            except Exception:
                 return None
 
 
@@ -1234,12 +1389,17 @@ if __name__ == "__main__":
 
     host = os.getenv("FT991_HOST", "0.0.0.0")
     port = int(os.getenv("FT991_PORT_HTTP", "5000"))
-    debug = _env_truthy("FT991_DEBUG", "1")
+    debug = _env_truthy("FT991_DEBUG", "0")
     try:
         ssl_context, ssl_note = _resolve_ssl_context()
     except Exception as exc:
         print(f"HTTPS configuration error: {exc}")
         raise SystemExit(1)
+
+    if _auth_is_configured() and debug:
+        raise SystemExit("Refusing to start authenticated server with FT991_DEBUG enabled.")
+    if _auth_is_configured() and not ssl_context and not _env_truthy("FT991_ALLOW_INSECURE_HTTP"):
+        raise SystemExit("Authentication requires HTTPS. Set FT991_HTTPS=1 or explicitly opt in with FT991_ALLOW_INSECURE_HTTP=1.")
 
     if ssl_context:
         print(f"HTTPS enabled ({ssl_note}). Open https://localhost:{port} or https://<LAN-IP>:{port}")

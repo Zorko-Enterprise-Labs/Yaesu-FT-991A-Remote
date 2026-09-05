@@ -48,6 +48,37 @@ body {
     gap: 8px;
 }
 
+.login-shell {
+    max-width: 420px;
+    min-height: 100vh;
+    align-content: center;
+}
+
+.login-panel {
+    padding: 18px;
+}
+
+.login-panel h1 {
+    margin: 4px 0 18px;
+}
+
+.login-panel form {
+    display: grid;
+    gap: 8px;
+}
+
+.login-error {
+    margin: 0 0 12px;
+    color: var(--sap-danger);
+    font-weight: 700;
+}
+
+.topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .panel {
     background: var(--sap-panel);
     border-top: 1px solid var(--sap-line-light);
